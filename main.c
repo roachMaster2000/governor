@@ -16,6 +16,10 @@
 #define SERVO_ZERO_POSITION 990
 #define SERVO_FULL_POSITION 2030
 
+#define PROPORTIONAL_GAIN 8
+#define INTEGRAL_GAIN 0.08
+#define DERIVATIVE_GAIN 0
+
 typedef enum
 {
     CHOKE,
@@ -160,53 +164,67 @@ void core0_gpio_callback(uint gpio, uint32_t events)
     g_switch_alarm_id = add_alarm_in_us(100000, &switch_alarm_callback, NULL, false);
 }
 
+float clamp(float val, float min, float max)
+{
+    const float ret = val < min ? min : val;
+    return val > max ? max : val;
+}
+
+void init_gpio(uint gpio, bool out, bool pull_up)
+{
+    gpio_init(gpio);
+    gpio_set_dir(gpio, out);
+    pull_up ? gpio_pull_up(gpio) : gpio_pull_down(gpio);
+}
+
+void init_pwm()
+{
+    gpio_set_function(PIN_SERVO, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(PIN_SERVO);
+    pwm_set_clkdiv(slice_num, 150.0f);  // 1_000_000/sec
+    pwm_set_wrap(slice_num, 20000 - 1); // 50Hz
+    pwm_set_enabled(slice_num, true);
+}
+
 int main()
 {
     stdio_init_all();
 
     multicore_launch_core1(core1_entry);
 
-    gpio_init(PIN_SWITCH_DOWN);
-    gpio_set_dir(PIN_SWITCH_DOWN, GPIO_IN);
-    gpio_pull_up(PIN_SWITCH_DOWN);
+    init_gpio(PIN_SWITCH_DOWN, GPIO_IN, true);
     gpio_set_irq_enabled_with_callback(PIN_SWITCH_DOWN, GPIO_IRQ_EDGE_FALL, true, &core0_gpio_callback);
 
-    gpio_init(PIN_SWITCH_UP);
-    gpio_set_dir(PIN_SWITCH_UP, GPIO_IN);
-    gpio_pull_up(PIN_SWITCH_UP);
+    init_gpio(PIN_SWITCH_UP, GPIO_IN, true);
     gpio_set_irq_enabled(PIN_SWITCH_UP, GPIO_IRQ_EDGE_FALL, true);
 
-    gpio_set_function(PIN_SERVO, GPIO_FUNC_PWM);
-    uint slice_num = pwm_gpio_to_slice_num(PIN_SERVO);
-    pwm_set_clkdiv(slice_num, 150.0f);  // 1_000_000/sec
-    pwm_set_wrap(slice_num, 20000 - 1); // 50Hz
-    pwm_set_enabled(slice_num, true);
+    init_pwm();
 
     Controller controller = {
-        .proportionalGain = 8.f,
-        .integralGain = 0.08f,
-        .derivativeGain = 0.f,
-        .integralMin = -1.f / .08f,
-        .integralMax = 1 / .08f,
+        .proportionalGain = PROPORTIONAL_GAIN,
+        .integralGain = INTEGRAL_GAIN,
+        .derivativeGain = DERIVATIVE_GAIN,
+        .integralMin = -1.f / INTEGRAL_GAIN,
+        .integralMax = 1 / INTEGRAL_GAIN,
     };
 
-    uint32_t interval = 10000;
+    uint32_t interval = 20000; // run the control loop at 50Hz
     uint32_t next = time_us_32();
-    float rpm = 0;
+    float actual_speed = 0;
     float scale_factor = SERVO_FULL_POSITION - SERVO_ZERO_POSITION;
     float command = 0;
     for (uint32_t i = 0;; i++)
     {
-        rpm = (60000000.f / 3600.f) / (float)g_one_revolution_time;
+        actual_speed = (60000000.f / 3600.f) / (float)g_one_revolution_time; // rpm 0-3600 in range 0-1
         if (i % 10 == 0)
         {
-            printf(">rpm:%f %u\r\n", rpm, g_is_turning);
+            printf(">actual_speed:%f %u\r\n", actual_speed, g_is_turning);
         }
 
         switch (g_state)
         {
         case CHOKE:
-            if (g_is_turning && rpm > 0.5f)
+            if (g_is_turning && actual_speed > 0.5f)
             {
                 g_state = SLOW;
             }
@@ -219,30 +237,20 @@ int main()
             break;
 
         case SLOW:
-            command = update(&controller, 0.75f, rpm);
-            if (command < 0)
-            {
-                command = 0;
-            }
-            else if (command > 1)
-            {
-                command = 1;
-            }
+            command = update(&controller, 0.75f, actual_speed);
+
+            command = clamp(command, 0, 1);
             command *= scale_factor;
+
             pwm_set_gpio_level(PIN_SERVO, SERVO_ZERO_POSITION + (uint16_t)command);
             break;
 
         case FAST:
-            command = update(&controller, 1.f, rpm);
-            if (command < 0)
-            {
-                command = 0;
-            }
-            else if (command > 1)
-            {
-                command = 1;
-            }
+            command = update(&controller, 1.f, actual_speed);
+
+            command = clamp(command, 0, 1);
             command *= scale_factor;
+
             pwm_set_gpio_level(PIN_SERVO, SERVO_ZERO_POSITION + (uint16_t)command);
             break;
 
