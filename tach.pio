@@ -1,0 +1,13 @@
+.program tach
+    pull ; pull loop counter from tx fifo to osr
+    out x 32 ; move loop counter from osr to x
+.wrap_target
+    wait 1 pin 0 ; wait for pin to go high
+failed:
+    mov y x ; copy loop counter from x to y
+    wait 0 pin 0 ; wait for pin to go low
+loop:
+    jmp pin failed ; if the pin has gone high, go back to failed (no need to wait for high)
+    jmp y-- loop ; decrement loop counter, continue loop
+    irq nowait 0 ; set interrupt
+.wrap

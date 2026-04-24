@@ -3,6 +3,7 @@
 #include "pico/multicore.h"
 #include "hardware/pwm.h"
 #include "pid/pid.h"
+#include "tach.pio.h"
 
 #define PIN_SWITCH_UP 10
 #define PIN_SWITCH_DOWN 11
@@ -10,6 +11,8 @@
 #define PIN_TACH 12
 
 #define NUMBER_OF_FLYWHEEL_REFLECTORS 8
+#define NUMBER_OF_REVOLUTIONS 2
+
 #define SERVO_ZERO_POSITION 990
 #define SERVO_FULL_POSITION 2030
 
@@ -44,46 +47,52 @@ int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
     return 0;
 }
 
-int64_t tachometer_alarm_callback(alarm_id_t id, void *user_data)
+uint32_t sensor_times[(NUMBER_OF_FLYWHEEL_REFLECTORS * NUMBER_OF_REVOLUTIONS) + 1];
+size_t pointer_position;
+
+void handle_irq(void)
 {
-    g_tachometer_detection_alarm_id = 0;
+    pio_interrupt_clear(pio0, 0); // TODO:
 
-    if (gpio_get(PIN_TACH) == 0)
+    sensor_times[pointer_position] = time_us_32();
+    uint8_t next_pointer_position = (pointer_position + 1) % (NUMBER_OF_FLYWHEEL_REFLECTORS * NUMBER_OF_REVOLUTIONS + 1);
+    g_one_revolution_time = (sensor_times[pointer_position] - sensor_times[next_pointer_position]) / NUMBER_OF_REVOLUTIONS;
+    pointer_position = next_pointer_position;
+
+    g_is_turning = true;
+    if (g_tachometer_timeout_alarm_id != 0)
     {
-        static uint32_t sensor_times[NUMBER_OF_FLYWHEEL_REFLECTORS + 1];
-        static size_t pointer_position;
-        sensor_times[pointer_position] = time_us_32();
-        uint8_t next_pointer_position = (pointer_position + 1) % NUMBER_OF_FLYWHEEL_REFLECTORS;
-        g_one_revolution_time = sensor_times[pointer_position] - sensor_times[next_pointer_position];
-        pointer_position = next_pointer_position;
-
-        g_is_turning = true;
-        if (g_tachometer_timeout_alarm_id != 0)
-        {
-            cancel_alarm(g_tachometer_timeout_alarm_id);
-        }
-        g_tachometer_timeout_alarm_id = add_alarm_in_us(100000, &tachometer_alarm_timeout_callback, NULL, false);
+        cancel_alarm(g_tachometer_timeout_alarm_id);
     }
-
-    return 0;
+    g_tachometer_timeout_alarm_id = add_alarm_in_us(100000, &tachometer_alarm_timeout_callback, NULL, false);
 }
 
-void core1_gpio_callback(uint gpio, uint32_t events)
+void tach_program_init(PIO pio, uint sm, uint offset, uint pin)
 {
-    if (g_tachometer_detection_alarm_id != 0)
-    {
-        cancel_alarm(g_tachometer_detection_alarm_id);
-    }
-    g_tachometer_detection_alarm_id = add_alarm_in_us(100, &tachometer_alarm_callback, NULL, false);
+    gpio_pull_up(pin);
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+    pio_sm_config c = tach_program_get_default_config(offset);
+
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    // sm_config_set_clkdiv(&c, 1);
+
+    pio_set_irq0_source_enabled(pio, pis_interrupt0, true);
+    irq_set_exclusive_handler(PIO0_IRQ_0, &handle_irq);
+    irq_set_enabled(PIO0_IRQ_0, true);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+    pio_sm_put_blocking(pio, sm, 625 * 150 / 2);
 }
 
 // core 1 handles interrupts from tachometer sensor
-void core_1_main()
+void core1_entry()
 {
-    gpio_init(PIN_TACH);
-    gpio_set_dir(PIN_TACH, GPIO_IN);
-    gpio_pull_up(PIN_TACH);
-    gpio_set_irq_enabled_with_callback(PIN_TACH, GPIO_IRQ_EDGE_FALL, true, &core1_gpio_callback);
+    uint offset = pio_add_program(pio0, &tach_program);
+    // printf("Loaded program at %d\n", offset);
+    tach_program_init(pio0, 0, offset, PIN_TACH);
 }
 
 int64_t switch_alarm_callback(alarm_id_t id, void *user_data)
@@ -155,7 +164,7 @@ int main()
 {
     stdio_init_all();
 
-    multicore_launch_core1(core_1_main);
+    multicore_launch_core1(core1_entry);
 
     gpio_init(PIN_SWITCH_DOWN);
     gpio_set_dir(PIN_SWITCH_DOWN, GPIO_IN);
@@ -188,7 +197,7 @@ int main()
     float command = 0;
     for (uint32_t i = 0;; i++)
     {
-        rpm = 60000000.f / (float)g_one_revolution_time;
+        rpm = (60000000.f / 3600.f) / (float)g_one_revolution_time;
         if (i % 10 == 0)
         {
             printf(">rpm:%f %u\r\n", rpm, g_is_turning);
@@ -197,7 +206,7 @@ int main()
         switch (g_state)
         {
         case CHOKE:
-            if (g_is_turning && rpm > 2000)
+            if (g_is_turning && rpm > 0.5f)
             {
                 g_state = SLOW;
             }
