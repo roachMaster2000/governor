@@ -183,11 +183,11 @@ int main()
     pwm_set_enabled(slice_num, true);
 
     Controller controller = {
-        .proportionalGain = 4.f,
-        .integralGain = 0.02f,
+        .proportionalGain = 8.f,
+        .integralGain = 0.08f,
         .derivativeGain = 0.f,
-        .integralMin = -50.f,
-        .integralMax = 50.f,
+        .integralMin = -1.f / .08f,
+        .integralMax = 1 / .08f,
     };
 
     uint32_t interval = 10000;
