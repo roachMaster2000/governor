@@ -13,19 +13,22 @@
 #define NUMBER_OF_FLYWHEEL_REFLECTORS 8
 #define NUMBER_OF_REVOLUTIONS 2
 
-#define SERVO_ZERO_POSITION 990
-#define SERVO_FULL_POSITION 2030
+const uint32_t SERVO_ZERO = 990;
+const uint32_t SERVO_FULL = 2020;
+const float SERVO_RANGE = SERVO_FULL - SERVO_ZERO;
 
-#define PROPORTIONAL_GAIN 8
-#define INTEGRAL_GAIN 0.08
-#define DERIVATIVE_GAIN 0
+// #define SERVO_ZERO_POSITION 990
+// #define SERVO_FULL_POSITION 2030
+
+// #define PROPORTIONAL_GAIN 8
+// #define INTEGRAL_GAIN 0
+// #define DERIVATIVE_GAIN 0
 
 typedef enum
 {
     CHOKE,
     IDLE,
-    SLOW,
-    FAST,
+    RUN,
 } state;
 
 volatile state g_state = CHOKE;
@@ -37,13 +40,21 @@ volatile alarm_id_t g_tachometer_timeout_alarm_id = 0;
 volatile bool g_is_turning = false;
 volatile float g_rpm = 0;
 
+volatile Controller controller = {
+    .proportionalGain = 8.f,
+    .integralGain = 0.08f,
+    .derivativeGain = 16.f,
+    .integralMin = -1.f / 0.08f,
+    .integralMax = 1 / 0.08f,
+};
+
 int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
 {
     g_tachometer_timeout_alarm_id = 0;
     g_is_turning = false;
 
     // if this alarm fires while the engine is in SLOW/FAST state it is likely a sensor failure, cut throttle to idle
-    if (g_state == SLOW || g_state == FAST)
+    if (g_state == RUN)
     {
         g_state = IDLE;
     }
@@ -62,7 +73,8 @@ void handle_irq(void)
     sensor_times[pointer_position] = time_us_32();
     uint8_t next_pointer_position = (pointer_position + 1) % (NUMBER_OF_FLYWHEEL_REFLECTORS * NUMBER_OF_REVOLUTIONS + 1);
     this_rpm = (60000000.f / 3600.f) / ((sensor_times[pointer_position] - sensor_times[next_pointer_position]) / NUMBER_OF_REVOLUTIONS);
-    g_rpm = g_rpm * 0.9f + this_rpm * 0.1f;
+    // g_rpm = g_rpm * 0.9f + this_rpm * 0.1f;
+    g_rpm = this_rpm;
     pointer_position = next_pointer_position;
 
     g_is_turning = true;
@@ -119,11 +131,8 @@ int64_t switch_alarm_callback(alarm_id_t id, void *user_data)
                 g_state = CHOKE;
             }
             break;
-        case SLOW:
+        case RUN:
             g_state = IDLE;
-            break;
-        case FAST:
-            g_state = SLOW;
             break;
         }
     }
@@ -138,17 +147,11 @@ int64_t switch_alarm_callback(alarm_id_t id, void *user_data)
             // only allow the governor to be engaged if the engine is running
             if (g_is_turning)
             {
-                g_state = SLOW;
+                controller.integralDeadTime = 25; // 0.5s at 50hz
+                g_state = RUN;
             }
             break;
-        case SLOW:
-            // only allow the governor to be engaged if the engine is running
-            if (g_is_turning)
-            {
-                g_state = FAST;
-            }
-            break;
-        case FAST:
+        case RUN:
             // nothing to do
             break;
         }
@@ -202,61 +205,51 @@ int main()
 
     init_pwm();
 
-    Controller controller = {
-        .proportionalGain = PROPORTIONAL_GAIN,
-        .integralGain = INTEGRAL_GAIN,
-        .derivativeGain = DERIVATIVE_GAIN,
-        .integralMin = -1.f / INTEGRAL_GAIN,
-        .integralMax = 1 / INTEGRAL_GAIN,
-    };
+    // Controller controller = {
+    //     .proportionalGain = 8.f,
+    //     .integralGain = 0.04f,
+    //     .derivativeGain = 16.f,
+    //     .integralMin = -1.f / 0.04f,
+    //     .integralMax = 1 / 0.04f,
+    // };
 
     uint32_t interval = 20000; // run the control loop at 50Hz
     uint32_t next = time_us_32();
-    float scale_factor = SERVO_FULL_POSITION - SERVO_ZERO_POSITION;
     float command = 0;
     for (uint32_t i = 0;; i++)
     {
-        if (i % 10 == 0)
-        {
-            printf(">actual_speed:%f %u\r\n", g_rpm, g_is_turning);
-        }
-
         switch (g_state)
         {
         case CHOKE:
             if (g_is_turning && g_rpm > 0.5f)
             {
-                g_state = SLOW;
+                g_state = IDLE;
             }
 
-            pwm_set_gpio_level(PIN_SERVO, SERVO_FULL_POSITION); // Full throttle
+            command = 1.f;
+            ; // full
             break;
 
         case IDLE:
-            pwm_set_gpio_level(PIN_SERVO, SERVO_ZERO_POSITION); // Closed throttle
+            command = 0.1f; // almost closed
             break;
 
-        case SLOW:
-            command = update(&controller, 0.8f, g_rpm);
-
-            command = clamp(command, 0, 1);
-            command *= scale_factor;
-
-            pwm_set_gpio_level(PIN_SERVO, SERVO_ZERO_POSITION + (uint16_t)command);
-            break;
-
-        case FAST:
+        case RUN:
             command = update(&controller, 1.f, g_rpm);
-
             command = clamp(command, 0, 1);
-            command *= scale_factor;
-
-            pwm_set_gpio_level(PIN_SERVO, SERVO_ZERO_POSITION + (uint16_t)command);
             break;
 
-        default:                                                // Should never be called
-            pwm_set_gpio_level(PIN_SERVO, SERVO_ZERO_POSITION); // Closed throttle
+        default: // Should never be called
+            command = SERVO_ZERO;
             break;
+        }
+
+        pwm_set_gpio_level(PIN_SERVO, SERVO_ZERO + (uint16_t)(command * SERVO_RANGE));
+
+        if (i % 5 == 0)
+        {
+            printf(">speed:%f\r\n", g_rpm);
+            printf(">command:%f\r\n", command);
         }
 
         next += interval;

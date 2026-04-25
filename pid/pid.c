@@ -7,14 +7,21 @@ float update(Controller *c, float target, float actual)
 
     proportionalTerm = c->proportionalGain * error;
 
-    c->integralState += error;
-    if (c->integralState > c->integralMax)
+    if (c->integralDeadTime > 0)
     {
-        c->integralState = c->integralMax;
+        c->integralDeadTime--;
     }
-    else if (c->integralState < c->integralMin)
+    else
     {
-        c->integralState = c->integralMin;
+        c->integralState += error;
+        if (c->integralState > c->integralMax)
+        {
+            c->integralState = c->integralMax;
+        }
+        else if (c->integralState < c->integralMin)
+        {
+            c->integralState = c->integralMin;
+        }
     }
     integralTerm = c->integralGain * c->integralState;
 

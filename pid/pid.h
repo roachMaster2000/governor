@@ -1,3 +1,5 @@
+#include "pico/stdlib.h"
+
 #ifndef PID_H
 #define PID_H
 
@@ -7,6 +9,7 @@ typedef struct
     float integralMin, integralMax;
     float integralState;
     float derivativeState;
+    uint32_t integralDeadTime;
 } Controller;
 
 float update(Controller *c, float target, float actual);
