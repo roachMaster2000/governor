@@ -35,7 +35,7 @@ volatile alarm_id_t g_tachometer_detection_alarm_id = 0;
 volatile alarm_id_t g_tachometer_timeout_alarm_id = 0;
 
 volatile bool g_is_turning = false;
-volatile uint32_t g_one_revolution_time = 0;
+volatile float g_rpm = 0;
 
 int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
 {
@@ -53,6 +53,7 @@ int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
 
 uint32_t sensor_times[(NUMBER_OF_FLYWHEEL_REFLECTORS * NUMBER_OF_REVOLUTIONS) + 1];
 size_t pointer_position;
+float this_rpm;
 
 void handle_irq(void)
 {
@@ -60,7 +61,8 @@ void handle_irq(void)
 
     sensor_times[pointer_position] = time_us_32();
     uint8_t next_pointer_position = (pointer_position + 1) % (NUMBER_OF_FLYWHEEL_REFLECTORS * NUMBER_OF_REVOLUTIONS + 1);
-    g_one_revolution_time = (sensor_times[pointer_position] - sensor_times[next_pointer_position]) / NUMBER_OF_REVOLUTIONS;
+    this_rpm = (60000000.f / 3600.f) / ((sensor_times[pointer_position] - sensor_times[next_pointer_position]) / NUMBER_OF_REVOLUTIONS);
+    g_rpm = g_rpm * 0.9f + this_rpm * 0.1f;
     pointer_position = next_pointer_position;
 
     g_is_turning = true;
@@ -210,21 +212,19 @@ int main()
 
     uint32_t interval = 20000; // run the control loop at 50Hz
     uint32_t next = time_us_32();
-    float actual_speed = 0;
     float scale_factor = SERVO_FULL_POSITION - SERVO_ZERO_POSITION;
     float command = 0;
     for (uint32_t i = 0;; i++)
     {
-        actual_speed = (60000000.f / 3600.f) / (float)g_one_revolution_time; // rpm 0-3600 in range 0-1
         if (i % 10 == 0)
         {
-            printf(">actual_speed:%f %u\r\n", actual_speed, g_is_turning);
+            printf(">actual_speed:%f %u\r\n", g_rpm, g_is_turning);
         }
 
         switch (g_state)
         {
         case CHOKE:
-            if (g_is_turning && actual_speed > 0.5f)
+            if (g_is_turning && g_rpm > 0.5f)
             {
                 g_state = SLOW;
             }
@@ -237,7 +237,7 @@ int main()
             break;
 
         case SLOW:
-            command = update(&controller, 0.75f, actual_speed);
+            command = update(&controller, 0.8f, g_rpm);
 
             command = clamp(command, 0, 1);
             command *= scale_factor;
@@ -246,7 +246,7 @@ int main()
             break;
 
         case FAST:
-            command = update(&controller, 1.f, actual_speed);
+            command = update(&controller, 1.f, g_rpm);
 
             command = clamp(command, 0, 1);
             command *= scale_factor;
