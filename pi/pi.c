@@ -1,8 +1,8 @@
-#include "pid.h"
+#include "pi.h"
 
-float update(Controller *c, float target, float actual)
+float update(PIController *c, float target, float actual)
 {
-    float proportionalTerm, integralTerm, derivativeTerm;
+    float proportionalTerm, integralTerm;
     float error = target - actual;
 
     proportionalTerm = c->proportionalGain * error;
@@ -25,8 +25,5 @@ float update(Controller *c, float target, float actual)
     }
     integralTerm = c->integralGain * c->integralState;
 
-    derivativeTerm = c->derivativeGain * (c->derivativeState - actual);
-    c->derivativeState = actual;
-
-    return proportionalTerm + integralTerm + derivativeTerm;
+    return c->feedForward + proportionalTerm + integralTerm;
 }

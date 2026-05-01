@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(waveshare-test main.c pid/pid.c)
+add_executable(waveshare-test main.c pi/pi.c)
 
 pico_set_program_name(waveshare-test "waveshare-test")
 pico_set_program_version(waveshare-test "0.1")

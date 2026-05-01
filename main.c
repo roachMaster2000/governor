@@ -2,7 +2,7 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/pwm.h"
-#include "pid/pid.h"
+#include "pi/pi.h"
 #include "tach.pio.h"
 
 #define PIN_SWITCH_UP 10
@@ -16,13 +16,6 @@
 const uint32_t SERVO_ZERO = 990;
 const uint32_t SERVO_FULL = 2020;
 const float SERVO_RANGE = SERVO_FULL - SERVO_ZERO;
-
-// #define SERVO_ZERO_POSITION 990
-// #define SERVO_FULL_POSITION 2030
-
-// #define PROPORTIONAL_GAIN 8
-// #define INTEGRAL_GAIN 0
-// #define DERIVATIVE_GAIN 0
 
 typedef enum
 {
@@ -40,12 +33,12 @@ volatile alarm_id_t g_tachometer_timeout_alarm_id = 0;
 volatile bool g_is_turning = false;
 volatile float g_rpm = 0;
 
-volatile Controller controller = {
+volatile PIController controller = {
+    .feedForward = 0.35f,
     .proportionalGain = 8.f,
     .integralGain = 0.08f,
-    .derivativeGain = 16.f,
-    .integralMin = -1.f / 0.08f,
-    .integralMax = 1 / 0.08f,
+    .integralMin = -1.35f / 0.08f,
+    .integralMax = 0.65f / 0.08f,
 };
 
 int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
@@ -53,7 +46,7 @@ int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
     g_tachometer_timeout_alarm_id = 0;
     g_is_turning = false;
 
-    // if this alarm fires while the engine is in SLOW/FAST state it is likely a sensor failure, cut throttle to idle
+    // if this alarm fires while the engine is in RUN state it is likely a sensor failure, cut throttle to idle
     if (g_state == RUN)
     {
         g_state = IDLE;
@@ -63,18 +56,16 @@ int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
 }
 
 uint32_t sensor_times[(NUMBER_OF_FLYWHEEL_REFLECTORS * NUMBER_OF_REVOLUTIONS) + 1];
-size_t pointer_position;
+uint8_t pointer_position;
 float this_rpm;
 
 void handle_irq(void)
 {
-    pio_interrupt_clear(pio0, 0); // TODO:
+    pio_interrupt_clear(pio0, 0);
 
     sensor_times[pointer_position] = time_us_32();
     uint8_t next_pointer_position = (pointer_position + 1) % (NUMBER_OF_FLYWHEEL_REFLECTORS * NUMBER_OF_REVOLUTIONS + 1);
-    this_rpm = (60000000.f / 3600.f) / ((sensor_times[pointer_position] - sensor_times[next_pointer_position]) / NUMBER_OF_REVOLUTIONS);
-    // g_rpm = g_rpm * 0.9f + this_rpm * 0.1f;
-    g_rpm = this_rpm;
+    g_rpm = (60000000.f / 3600.f) / ((sensor_times[pointer_position] - sensor_times[next_pointer_position]) / NUMBER_OF_REVOLUTIONS);
     pointer_position = next_pointer_position;
 
     g_is_turning = true;
@@ -94,7 +85,7 @@ void tach_program_init(PIO pio, uint sm, uint offset, uint pin)
 
     sm_config_set_in_pins(&c, pin);
     sm_config_set_jmp_pin(&c, pin);
-    // sm_config_set_clkdiv(&c, 1);
+    sm_config_set_clkdiv(&c, 1);
 
     pio_set_irq0_source_enabled(pio, pis_interrupt0, true);
     irq_set_exclusive_handler(PIO0_IRQ_0, &handle_irq);
@@ -102,7 +93,7 @@ void tach_program_init(PIO pio, uint sm, uint offset, uint pin)
 
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_enabled(pio, sm, true);
-    pio_sm_put_blocking(pio, sm, 625 * 150 / 2);
+    pio_sm_put_blocking(pio, sm, 46875 / 2); // 1/2 Number of clock cycles tach needs to stay low for the be a valid reading. 46875 cycles at 150mhz = 1/32 of a revolution at 6000rpm
 }
 
 // core 1 handles interrupts from tachometer sensor
@@ -205,15 +196,7 @@ int main()
 
     init_pwm();
 
-    // Controller controller = {
-    //     .proportionalGain = 8.f,
-    //     .integralGain = 0.04f,
-    //     .derivativeGain = 16.f,
-    //     .integralMin = -1.f / 0.04f,
-    //     .integralMax = 1 / 0.04f,
-    // };
-
-    uint32_t interval = 20000; // run the control loop at 50Hz
+    uint32_t interval = 1000000 / 50; // run the control loop at 50Hz (analogue servo frequency)
     uint32_t next = time_us_32();
     float command = 0;
     for (uint32_t i = 0;; i++)
@@ -226,12 +209,11 @@ int main()
                 g_state = IDLE;
             }
 
-            command = 1.f;
-            ; // full
+            command = 1.f; // open throttle for starting
             break;
 
         case IDLE:
-            command = 0.1f; // almost closed
+            command = 0.1f; // 10% throttle for idle
             break;
 
         case RUN:
