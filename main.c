@@ -36,9 +36,9 @@ volatile float g_rpm = 0;
 volatile PIController controller = {
     .feedForward = 0.35f,
     .proportionalGain = 8.f,
-    .integralGain = 0.08f,
-    .integralMin = -1.35f / 0.08f,
-    .integralMax = 0.65f / 0.08f,
+    .integralGain = 0.04f,
+    .integralMin = -1.35f / 0.04f,
+    .integralMax = 0.65f / 0.04f,
 };
 
 int64_t tachometer_alarm_timeout_callback(alarm_id_t id, void *user_data)
